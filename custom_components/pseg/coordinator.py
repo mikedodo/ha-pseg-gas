@@ -10,7 +10,7 @@ import aiohttp
 
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfEnergy
+from homeassistant.const import UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
@@ -46,6 +46,7 @@ from .pseg_client import PsegAuthError, PsegClient, PsegConnectionError
 _LOGGER = logging.getLogger(__name__)
 
 UNIT_THERM = getattr(UnitOfEnergy, "THERM", "therm")
+UNIT_CCF = getattr(UnitOfVolume, "CENTUM_CUBIC_FEET", "CCF")
 
 
 class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
@@ -372,7 +373,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             cost_id = f"{DOMAIN}:gas_cost"
             consumption_name = "PSE&G Natural Gas Consumption"
             cost_name = "PSE&G Natural Gas Cost"
-            consumption_unit = UNIT_THERM
+            consumption_unit = UNIT_CCF
             unit_class = "gas"
         else:
             consumption_id = f"{DOMAIN}:electricity_consumption"

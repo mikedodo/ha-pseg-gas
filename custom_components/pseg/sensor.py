@@ -12,7 +12,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfEnergy, UnitOfTemperature
+from homeassistant.const import UnitOfEnergy, UnitOfTemperature, UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
@@ -54,6 +54,7 @@ from .coordinator import PsegDataUpdateCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 UNIT_THERM = getattr(UnitOfEnergy, "THERM", "therm")
+UNIT_CCF = getattr(UnitOfVolume, "CENTUM_CUBIC_FEET", "CCF")
 
 
 async def async_setup_entry(
@@ -366,7 +367,7 @@ class PsegGasConsumptionSensor(PsegBaseSensor):
     _attr_name = "Gas Consumption"
     _attr_device_class = SensorDeviceClass.GAS
     _attr_state_class = None
-    _attr_native_unit_of_measurement = UNIT_THERM
+    _attr_native_unit_of_measurement = UNIT_CCF
     _attr_icon = "mdi:fire"
 
     def __init__(self, coordinator: PsegDataUpdateCoordinator, entry: ConfigEntry) -> None:
@@ -490,7 +491,7 @@ class PsegGasRateSensor(PsegBaseSensor):
     """Sensor for effective natural gas rate ($/therm)."""
 
     _attr_name = "Gas Effective Rate"
-    _attr_native_unit_of_measurement = "USD/therm"
+    _attr_native_unit_of_measurement = "USD/CCF"
     _attr_icon = "mdi:cash"
 
     def __init__(self, coordinator: PsegDataUpdateCoordinator, entry: ConfigEntry) -> None:
