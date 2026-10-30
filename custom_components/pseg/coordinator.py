@@ -1,4 +1,4 @@
-"""DataUpdateCoordinator for the PSE&G Energy integration."""
+"""DataUpdateCoordinator for the PSE&G Energy integration (Electric & Natural Gas)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import aiohttp
 
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
@@ -31,10 +32,12 @@ from .const import (
     CONF_AUTH_TYPE,
     CONF_COOKIE,
     CONF_ELECTRIC_RATE,
+    CONF_GAS_RATE,
     CONF_PASSWORD,
     CONF_USERNAME,
     DEFAULT_AUTH_SERVER_URL,
     DEFAULT_ELECTRIC_RATE,
+    DEFAULT_GAS_RATE,
     DEFAULT_SCAN_INTERVAL_HOURS,
     DOMAIN,
 )
@@ -42,9 +45,11 @@ from .pseg_client import PsegAuthError, PsegClient, PsegConnectionError
 
 _LOGGER = logging.getLogger(__name__)
 
+UNIT_THERM = getattr(UnitOfEnergy, "THERM", "therm")
+
 
 class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
-    """Class to manage fetching PSE&G energy data from MyMeter."""
+    """Class to manage fetching PSE&G electricity and natural gas data from MyMeter."""
 
     def __init__(
         self,
@@ -64,7 +69,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self.status: str = "connected"
         self.last_successful_update: Optional[str] = None
 
-        # Resolve optional user-configured rate override (None enables auto-derived 7-day average)
+        # Resolve optional user-configured electric rate override
         user_rate = None
         if config_entry and config_entry.options.get(CONF_ELECTRIC_RATE) is not None:
             user_rate = config_entry.options.get(CONF_ELECTRIC_RATE)
@@ -76,11 +81,28 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         except (ValueError, TypeError):
             self.user_configured_rate = None
 
+        # Resolve optional user-configured gas rate override
+        user_gas_rate = None
+        if config_entry and config_entry.options.get(CONF_GAS_RATE) is not None:
+            user_gas_rate = config_entry.options.get(CONF_GAS_RATE)
+        elif entry_data.get(CONF_GAS_RATE) is not None:
+            user_gas_rate = entry_data.get(CONF_GAS_RATE)
+
+        try:
+            self.user_configured_gas_rate = float(user_gas_rate) if user_gas_rate is not None and float(user_gas_rate) > 0 else None
+        except (ValueError, TypeError):
+            self.user_configured_gas_rate = None
+
         self.client.user_configured_rate = self.user_configured_rate
+        self.client.user_configured_gas_rate = self.user_configured_gas_rate
+
         self.effective_rate = self.user_configured_rate or DEFAULT_ELECTRIC_RATE
         self.rate_source = "user_configured" if self.user_configured_rate else "default"
         self.rate_7d_avg: Optional[float] = None
         self.days_used_for_rate: int = 0
+
+        self.effective_gas_rate = self.user_configured_gas_rate or DEFAULT_GAS_RATE
+        self.gas_rate_source = "user_configured" if self.user_configured_gas_rate else "default"
 
         super().__init__(
             hass,
@@ -91,8 +113,13 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
     @property
     def electric_rate(self) -> float:
-        """Return effective rate for backwards compatibility."""
+        """Return effective electric rate for backwards compatibility."""
         return self.effective_rate
+
+    @property
+    def gas_rate(self) -> float:
+        """Return effective natural gas rate."""
+        return self.effective_gas_rate
 
     def _dismiss_auth_issues(self) -> None:
         """Dismiss persistent notification and repairs issue once authenticated."""
@@ -162,7 +189,6 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             or DEFAULT_AUTH_SERVER_URL
         )
 
-        # Only probe user-configured companion URL (and local loopback alias if local)
         candidate_urls = [configured_url]
         if "127.0.0.1" in configured_url and "http://localhost:8000" not in candidate_urls:
             candidate_urls.append("http://localhost:8000")
@@ -211,17 +237,28 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         return False
 
     async def _async_update_data(self) -> Dict[str, Any]:
-        """Fetch data from PSE&G."""
+        """Fetch electricity and natural gas data from PSE&G."""
         try:
             data = await self.hass.async_add_executor_job(
                 self.client.fetch_energy_data, 14
             )
-            records = data.get("hourly_records") or data.get("history_14d")
-            if records:
+
+            # Record electricity statistics
+            records_elec = data.get("hourly_records") or data.get("history_14d")
+            if records_elec:
                 try:
-                    await self.async_record_statistics(records, is_backfill=False)
+                    await self.async_record_statistics(records_elec, is_backfill=False, is_gas=False)
                 except Exception as stat_err:
-                    _LOGGER.warning("Could not record statistics into LTS: %s", stat_err)
+                    _LOGGER.warning("Could not record electricity statistics into LTS: %s", stat_err)
+
+            # Record natural gas statistics
+            records_gas = data.get("gas_hourly_records") or data.get("gas_history_14d")
+            if records_gas:
+                try:
+                    await self.async_record_statistics(records_gas, is_backfill=False, is_gas=True)
+                except Exception as stat_err:
+                    _LOGGER.warning("Could not record natural gas statistics into LTS: %s", stat_err)
+
             self.next_update_time = dt_util.utcnow() + self.update_interval
             data["next_update"] = self.next_update_time.isoformat()
             self._last_valid_data = data
@@ -230,6 +267,10 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             self.rate_source = data.get("rate_source", self.rate_source)
             self.rate_7d_avg = data.get("rate_7d_avg")
             self.days_used_for_rate = data.get("days_used_for_rate", 0)
+
+            self.effective_gas_rate = data.get("effective_gas_rate", self.effective_gas_rate)
+            self.gas_rate_source = data.get("gas_rate_source", self.gas_rate_source)
+
             self.auth_required = False
             self.status = "connected"
             self._dismiss_auth_issues()
@@ -246,12 +287,19 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 data = await self.hass.async_add_executor_job(
                     self.client.fetch_energy_data, 14
                 )
-                records = data.get("hourly_records") or data.get("history_14d")
-                if records:
+                records_elec = data.get("hourly_records") or data.get("history_14d")
+                if records_elec:
                     try:
-                        await self.async_record_statistics(records, is_backfill=False)
+                        await self.async_record_statistics(records_elec, is_backfill=False, is_gas=False)
                     except Exception as stat_err:
-                        _LOGGER.warning("Could not record statistics into LTS: %s", stat_err)
+                        _LOGGER.warning("Could not record electricity statistics into LTS: %s", stat_err)
+                records_gas = data.get("gas_hourly_records") or data.get("gas_history_14d")
+                if records_gas:
+                    try:
+                        await self.async_record_statistics(records_gas, is_backfill=False, is_gas=True)
+                    except Exception as stat_err:
+                        _LOGGER.warning("Could not record natural gas statistics into LTS: %s", stat_err)
+
                 self.next_update_time = dt_util.utcnow() + self.update_interval
                 data["next_update"] = self.next_update_time.isoformat()
                 self._last_valid_data = data
@@ -261,7 +309,6 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 self._dismiss_auth_issues()
                 return data
 
-            # Silent re-authentication could not complete -> alert user and trigger Reconfigure
             username = self.entry_data.get(CONF_USERNAME)
             is_cookie_mode = (
                 self.entry_data.get(CONF_AUTH_TYPE) == AUTH_TYPE_COOKIE
@@ -288,14 +335,14 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self,
         records: list[dict[str, Any]],
         is_backfill: bool = False,
+        is_gas: bool = False,
     ) -> None:
-        """Import energy consumption and cost records into Home Assistant external long-term statistics."""
+        """Import electricity or gas consumption and cost records into Home Assistant external long-term statistics."""
         if not records:
             return
 
         tz = dt_util.get_time_zone(self.hass.config.time_zone)
 
-        # Normalize records to UTC start datetime and float values
         normalized_records = []
         for r in records:
             start_dt = None
@@ -311,27 +358,39 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             if not start_dt:
                 continue
 
-            kwh = float(r.get("kwh") or 0.0)
+            usage = float(r.get("therms") if is_gas else r.get("kwh") or 0.0)
             cost = float(r.get("cost") or 0.0)
-            normalized_records.append({"start": start_dt, "kwh": kwh, "cost": cost})
+            normalized_records.append({"start": start_dt, "usage": usage, "cost": cost})
 
         if not normalized_records:
             return
 
         sorted_records = sorted(normalized_records, key=lambda x: x["start"])
 
-        consumption_id = f"{DOMAIN}:electricity_consumption"
-        cost_id = f"{DOMAIN}:electricity_cost"
+        if is_gas:
+            consumption_id = f"{DOMAIN}:gas_consumption"
+            cost_id = f"{DOMAIN}:gas_cost"
+            consumption_name = "PSE&G Natural Gas Consumption"
+            cost_name = "PSE&G Natural Gas Cost"
+            consumption_unit = UNIT_THERM
+            unit_class = "gas"
+        else:
+            consumption_id = f"{DOMAIN}:electricity_consumption"
+            cost_id = f"{DOMAIN}:electricity_cost"
+            consumption_name = "PSE&G Electricity Consumption"
+            cost_name = "PSE&G Electricity Cost"
+            consumption_unit = "kWh"
+            unit_class = "energy"
 
         consumption_meta: StatisticMetaData = {
             "has_mean": False,
             "has_sum": True,
             "mean_type": 0,
-            "unit_class": "energy",
-            "name": "PSE&G Electricity Consumption",
+            "unit_class": unit_class,
+            "name": consumption_name,
             "source": DOMAIN,
             "statistic_id": consumption_id,
-            "unit_of_measurement": "kWh",
+            "unit_of_measurement": consumption_unit,
         }
 
         cost_meta: StatisticMetaData = {
@@ -339,13 +398,12 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             "has_sum": True,
             "mean_type": 0,
             "unit_class": None,
-            "name": "PSE&G Electricity Cost",
+            "name": cost_name,
             "source": DOMAIN,
             "statistic_id": cost_id,
             "unit_of_measurement": "USD",
         }
 
-        # Check existing external statistics in Home Assistant
         last_stat_start_dt: Optional[datetime] = None
         last_consumption_sum = 0.0
         last_cost_sum = 0.0
@@ -368,7 +426,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                     last_stat_start_dt = dt_util.as_utc(stat_start)
                 last_consumption_sum = float(last_stat.get("sum") or 0.0)
         except Exception as err:
-            _LOGGER.debug("Could not query last consumption statistic: %s", err)
+            _LOGGER.debug("Could not query last %s statistic: %s", consumption_id, err)
 
         try:
             last_cost_stats = await get_instance(self.hass).async_add_executor_job(
@@ -383,13 +441,12 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 last_cost_stat = last_cost_stats[cost_id][0]
                 last_cost_sum = float(last_cost_stat.get("sum") or 0.0)
         except Exception as err:
-            _LOGGER.debug("Could not query last cost statistic: %s", err)
+            _LOGGER.debug("Could not query last %s statistic: %s", cost_id, err)
 
         consumption_stats: list[StatisticData] = []
         cost_stats: list[StatisticData] = []
 
         if is_backfill or last_stat_start_dt is None:
-            # Full backfill or fresh initialization
             first_start = sorted_records[0]["start"]
             step = timedelta(hours=1)
             if len(sorted_records) > 1:
@@ -416,34 +473,33 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             running_cost = 0.0
             records_to_process = sorted_records
         else:
-            # Incremental append: strictly process records newer than the latest recorded statistic
             records_to_process = [r for r in sorted_records if r["start"] > last_stat_start_dt]
             running_consumption = last_consumption_sum
             running_cost = last_cost_sum
 
         if not records_to_process and len(consumption_stats) <= 1:
-            _LOGGER.debug("No new statistics to record (all records <= %s)", last_stat_start_dt)
+            _LOGGER.debug("No new statistics to record for %s", consumption_id)
             return
 
         for r in records_to_process:
             start_utc = r["start"]
-            kwh = r["kwh"]
-            cost = r["cost"]
+            usage_val = r["usage"]
+            cost_val = r["cost"]
 
-            running_consumption += kwh
-            running_cost += cost
+            running_consumption += usage_val
+            running_cost += cost_val
 
             consumption_stats.append(
                 StatisticData(
                     start=start_utc,
-                    state=kwh,
+                    state=usage_val,
                     sum=round(running_consumption, 4),
                 )
             )
             cost_stats.append(
                 StatisticData(
                     start=start_utc,
-                    state=cost,
+                    state=cost_val,
                     sum=round(running_cost, 4),
                 )
             )
@@ -451,12 +507,10 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         async_add_external_statistics(self.hass, consumption_meta, consumption_stats)
         async_add_external_statistics(self.hass, cost_meta, cost_stats)
         _LOGGER.info(
-            "Added %d external statistics into LTS for %s and %s (%s to %s)",
+            "Added %d external statistics into LTS for %s and %s",
             len(consumption_stats),
             consumption_id,
             cost_id,
-            consumption_stats[0]["start"].isoformat(),
-            consumption_stats[-1]["start"].isoformat(),
         )
 
     async def async_backfill_history(
@@ -515,14 +569,6 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 )
                 addon_offline = not getattr(self, "_addon_connected", False) if not is_cookie_mode else False
                 self._raise_auth_issues(str(auth_err), addon_offline=addon_offline)
-                if is_cookie_mode:
-                    raise HomeAssistantError(
-                        "PSE&G session cookie has expired. Please re-authenticate under Settings > Devices & Services > PSE&G > Reconfigure."
-                    ) from auth_err
-                if addon_offline:
-                    raise HomeAssistantError(
-                        "PSE&G companion service is unreachable. Please verify the companion add-on or Docker container is running, or re-authenticate under Settings > Devices & Services > PSE&G > Reconfigure."
-                    ) from auth_err
                 raise HomeAssistantError(
                     "Session expired or authentication failed. Please re-authenticate under Settings > Devices & Services > PSE&G."
                 ) from auth_err
@@ -531,9 +577,8 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             _LOGGER.warning("No historical records returned from PSE&G for %s to %s", start_date_str, end_date_str)
             return 0
 
-        await self.async_record_statistics(records, is_backfill=True)
+        await self.async_record_statistics(records, is_backfill=True, is_gas=False)
 
-        # Update coordinator state if backfill includes latest readings
         latest_record = records[-1]
         if self._last_valid_data is not None:
             self._last_valid_data["history_14d"] = records[-14:]

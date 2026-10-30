@@ -1,4 +1,4 @@
-"""Sensors for the PSE&G Energy integration."""
+"""Sensors for the PSE&G Energy integration (Electric & Natural Gas)."""
 
 from __future__ import annotations
 
@@ -23,17 +23,27 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     ATTR_DAYS_USED_FOR_RATE,
+    ATTR_GAS_HISTORY_14D,
+    ATTR_GAS_METER,
     ATTR_HISTORY_14D,
     ATTR_IS_EXACT_PORTAL_COST,
     ATTR_LATEST_COST,
     ATTR_LATEST_DATE,
+    ATTR_LATEST_GAS_COST,
+    ATTR_LATEST_GAS_DATE,
+    ATTR_LATEST_THERMS,
     ATTR_METER,
     ATTR_PREVIOUS_COST,
     ATTR_PREVIOUS_DATE,
+    ATTR_PREVIOUS_GAS_COST,
+    ATTR_PREVIOUS_GAS_DATE,
     ATTR_PREVIOUS_KWH,
+    ATTR_PREVIOUS_THERMS,
     ATTR_RATE_7D_AVG,
     ATTR_RATE_APPLIED,
+    ATTR_RATE_APPLIED_GAS,
     ATTR_RATE_SOURCE,
+    ATTR_RATE_SOURCE_GAS,
     ATTR_TEMPERATURE_AVG,
     ATTR_TEMPERATURE_HIGH,
     ATTR_TEMPERATURE_LOW,
@@ -43,13 +53,15 @@ from .coordinator import PsegDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
+UNIT_THERM = getattr(UnitOfEnergy, "THERM", "therm")
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up PSE&G sensor entries."""
+    """Set up PSE&G sensor entries for electricity and natural gas."""
     coordinator: PsegDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
 
     # Automated migration for entity unique IDs and entity IDs from legacy naming
@@ -83,10 +95,19 @@ async def async_setup_entry(
         _LOGGER.warning("Could not run entity registry migration: %s", err)
 
     entities = [
+        # Electricity entities
         PsegElectricityConsumptionSensor(coordinator, entry),
         PsegElectricityCostSensor(coordinator, entry),
         PsegElectricityMeterSensor(coordinator, entry),
         PsegElectricityLatestDateSensor(coordinator, entry),
+        PsegElectricityRateSensor(coordinator, entry),
+        # Natural gas entities
+        PsegGasConsumptionSensor(coordinator, entry),
+        PsegGasCostSensor(coordinator, entry),
+        PsegGasMeterSensor(coordinator, entry),
+        PsegGasLatestDateSensor(coordinator, entry),
+        PsegGasRateSensor(coordinator, entry),
+        # Shared environment and integration diagnostics
         PsegTemperatureSensor(coordinator, entry),
         PsegNextUpdateSensor(coordinator, entry),
         PsegConnectionStatusSensor(coordinator, entry),
@@ -129,9 +150,7 @@ class PsegBaseSensor(CoordinatorEntity[PsegDataUpdateCoordinator], RestoreEntity
 
     @property
     def available(self) -> bool:
-        """Return True if data exists or has previously been loaded.
-        Prevents full entity blackout across Home Assistant during session expiration or reauth.
-        """
+        """Return True if data exists or has previously been loaded."""
         return self._data is not None or self._restored_state is not None
 
     @property
@@ -174,6 +193,10 @@ class PsegConnectionStatusSensor(PsegBaseSensor):
         }
 
 
+# =========================================================================
+# Electricity Sensors
+# =========================================================================
+
 class PsegElectricityConsumptionSensor(PsegBaseSensor):
     """Sensor for electricity consumption in kWh."""
 
@@ -200,7 +223,7 @@ class PsegElectricityConsumptionSensor(PsegBaseSensor):
 
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
-        """Return full history and context attributes for the custom card."""
+        """Return full history and context attributes."""
         attrs = {}
         if self._restored_state and self._restored_state.attributes:
             attrs.update({
@@ -275,7 +298,7 @@ class PsegElectricityCostSensor(PsegBaseSensor):
 
 
 class PsegElectricityMeterSensor(PsegBaseSensor):
-    """Sensor for the meter ID/description."""
+    """Sensor for the electricity meter ID/description."""
 
     _attr_name = "Meter ID"
     _attr_icon = "mdi:meter-electric"
@@ -293,7 +316,7 @@ class PsegElectricityMeterSensor(PsegBaseSensor):
 
 
 class PsegElectricityLatestDateSensor(PsegBaseSensor):
-    """Sensor for the latest reading date."""
+    """Sensor for the latest electricity reading date."""
 
     _attr_name = "Latest Reading Date"
     _attr_icon = "mdi:calendar-clock"
@@ -309,6 +332,184 @@ class PsegElectricityLatestDateSensor(PsegBaseSensor):
             return self._restored_state.state
         return None
 
+
+class PsegElectricityRateSensor(PsegBaseSensor):
+    """Sensor for effective electricity rate ($/kWh)."""
+
+    _attr_name = "Electricity Effective Rate"
+    _attr_native_unit_of_measurement = "USD/kWh"
+    _attr_icon = "mdi:cash"
+
+    def __init__(self, coordinator: PsegDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "electricity_rate")
+
+    @property
+    def native_value(self) -> Optional[float]:
+        return self.coordinator.effective_rate
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        return {
+            ATTR_RATE_SOURCE: self.coordinator.rate_source,
+            ATTR_RATE_7D_AVG: self.coordinator.rate_7d_avg,
+            ATTR_DAYS_USED_FOR_RATE: self.coordinator.days_used_for_rate,
+        }
+
+
+# =========================================================================
+# Natural Gas Sensors
+# =========================================================================
+
+class PsegGasConsumptionSensor(PsegBaseSensor):
+    """Sensor for natural gas consumption in therms."""
+
+    _attr_name = "Gas Consumption"
+    _attr_device_class = SensorDeviceClass.GAS
+    _attr_state_class = None
+    _attr_native_unit_of_measurement = UNIT_THERM
+    _attr_icon = "mdi:fire"
+
+    def __init__(self, coordinator: PsegDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "gas_consumption")
+
+    @property
+    def native_value(self) -> Optional[float]:
+        """Return the consumption in therms."""
+        if self._data and "latest_therms" in self._data:
+            return self._data.get("latest_therms")
+        if self._restored_state:
+            try:
+                return float(self._restored_state.state)
+            except (ValueError, TypeError):
+                pass
+        return None
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        """Return full history and context attributes for natural gas."""
+        attrs = {}
+        if self._restored_state and self._restored_state.attributes:
+            attrs.update({
+                k: v for k, v in self._restored_state.attributes.items()
+                if k not in ("state_class", "device_class", "unit_of_measurement", "icon", "friendly_name")
+            })
+        if self._data:
+            attrs.update({
+                ATTR_GAS_METER: self._data.get("gas_meter"),
+                ATTR_LATEST_GAS_DATE: self._data.get("latest_gas_date"),
+                ATTR_PREVIOUS_GAS_DATE: self._data.get("previous_gas_date"),
+                ATTR_PREVIOUS_THERMS: self._data.get("previous_therms"),
+                ATTR_PREVIOUS_GAS_COST: self._data.get("previous_gas_cost"),
+                ATTR_LATEST_GAS_COST: self._data.get("latest_gas_cost"),
+                ATTR_RATE_APPLIED_GAS: self.coordinator.effective_gas_rate,
+                ATTR_RATE_SOURCE_GAS: self.coordinator.gas_rate_source,
+                ATTR_GAS_HISTORY_14D: self._data.get("gas_history_14d", []),
+                "last_updated": self._data.get("last_updated"),
+                "next_update": self._data.get("next_update"),
+            })
+        attrs["auth_required"] = self.coordinator.auth_required
+        attrs["connection_status"] = self.coordinator.status
+        return attrs
+
+
+class PsegGasCostSensor(PsegBaseSensor):
+    """Sensor for natural gas cost in USD."""
+
+    _attr_name = "Gas Cost"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = None
+    _attr_native_unit_of_measurement = "USD"
+    _attr_icon = "mdi:currency-usd"
+
+    def __init__(self, coordinator: PsegDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "gas_cost")
+
+    @property
+    def native_value(self) -> Optional[float]:
+        """Return the gas cost in dollars."""
+        if self._data and "latest_gas_cost" in self._data:
+            return self._data.get("latest_gas_cost")
+        if self._restored_state:
+            try:
+                return float(self._restored_state.state)
+            except (ValueError, TypeError):
+                pass
+        return None
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        """Return extra state attributes for gas cost."""
+        attrs: Dict[str, Any] = {}
+        if self._restored_state and self._restored_state.attributes:
+            attrs.update({
+                k: v for k, v in self._restored_state.attributes.items()
+                if k not in ("state_class", "device_class", "unit_of_measurement", "icon", "friendly_name")
+            })
+        attrs[ATTR_RATE_APPLIED_GAS] = self.coordinator.effective_gas_rate
+        attrs[ATTR_RATE_SOURCE_GAS] = self.coordinator.gas_rate_source
+        return attrs
+
+
+class PsegGasMeterSensor(PsegBaseSensor):
+    """Sensor for the natural gas meter ID/description."""
+
+    _attr_name = "Gas Meter ID"
+    _attr_icon = "mdi:meter-gas"
+
+    def __init__(self, coordinator: PsegDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "gas_meter_id")
+
+    @property
+    def native_value(self) -> Optional[str]:
+        if self._data and "gas_meter" in self._data:
+            return self._data.get("gas_meter")
+        if self._restored_state:
+            return self._restored_state.state
+        return None
+
+
+class PsegGasLatestDateSensor(PsegBaseSensor):
+    """Sensor for the latest natural gas reading date."""
+
+    _attr_name = "Gas Latest Reading Date"
+    _attr_icon = "mdi:calendar-clock"
+
+    def __init__(self, coordinator: PsegDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "gas_latest_reading_date")
+
+    @property
+    def native_value(self) -> Optional[str]:
+        if self._data and "latest_gas_date" in self._data:
+            return self._data.get("latest_gas_date")
+        if self._restored_state:
+            return self._restored_state.state
+        return None
+
+
+class PsegGasRateSensor(PsegBaseSensor):
+    """Sensor for effective natural gas rate ($/therm)."""
+
+    _attr_name = "Gas Effective Rate"
+    _attr_native_unit_of_measurement = "USD/therm"
+    _attr_icon = "mdi:cash"
+
+    def __init__(self, coordinator: PsegDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "gas_rate")
+
+    @property
+    def native_value(self) -> Optional[float]:
+        return self.coordinator.effective_gas_rate
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        return {
+            ATTR_RATE_SOURCE: self.coordinator.gas_rate_source,
+        }
+
+
+# =========================================================================
+# Shared Sensors
+# =========================================================================
 
 class PsegTemperatureSensor(PsegBaseSensor):
     """Sensor for the outdoor average temperature."""

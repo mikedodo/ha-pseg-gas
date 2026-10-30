@@ -1,4 +1,4 @@
-"""Constants for the PSE&G Energy integration."""
+"""Constants for the PSE&G Energy integration (Electric & Natural Gas)."""
 
 DOMAIN = "pseg"
 
@@ -9,6 +9,7 @@ CONF_MFA_METHOD = "mfa_method"
 CONF_MFA_CODE = "mfa_code"
 CONF_AUTH_SERVER_URL = "auth_server_url"
 CONF_ELECTRIC_RATE = "electric_rate"
+CONF_GAS_RATE = "gas_rate"
 CONF_AUTH_TYPE = "auth_type"
 
 AUTH_TYPE_MYMETER = "mymeter"
@@ -19,22 +20,33 @@ DEFAULT_MFA_METHOD = "sms"
 DEFAULT_SCAN_INTERVAL_HOURS = 4
 DEFAULT_AUTH_SERVER_URL = "http://127.0.0.1:8000"
 DEFAULT_ELECTRIC_RATE = 0.247
+DEFAULT_GAS_RATE = 1.05
 
 MFA_METHOD_SMS = "sms"
 MFA_METHOD_EMAIL = "email"
 
 ATTR_METER = "meter"
+ATTR_GAS_METER = "gas_meter"
 ATTR_LATEST_DATE = "latest_date"
+ATTR_LATEST_GAS_DATE = "latest_gas_date"
 ATTR_PREVIOUS_DATE = "previous_date"
+ATTR_PREVIOUS_GAS_DATE = "previous_gas_date"
 ATTR_PREVIOUS_KWH = "previous_kwh"
+ATTR_PREVIOUS_THERMS = "previous_therms"
 ATTR_PREVIOUS_COST = "previous_cost"
+ATTR_PREVIOUS_GAS_COST = "previous_gas_cost"
 ATTR_LATEST_COST = "latest_cost"
+ATTR_LATEST_GAS_COST = "latest_gas_cost"
+ATTR_LATEST_THERMS = "latest_therms"
 ATTR_RATE_APPLIED = "rate_applied"
+ATTR_RATE_APPLIED_GAS = "rate_applied_gas"
 ATTR_RATE_SOURCE = "rate_source"
+ATTR_RATE_SOURCE_GAS = "rate_source_gas"
 ATTR_RATE_7D_AVG = "rate_7d_avg"
 ATTR_DAYS_USED_FOR_RATE = "days_used_for_rate"
 ATTR_IS_EXACT_PORTAL_COST = "is_exact_portal_cost"
 ATTR_HISTORY_14D = "history_14d"
+ATTR_GAS_HISTORY_14D = "gas_history_14d"
 ATTR_TEMPERATURE_HIGH = "temperature_high"
 ATTR_TEMPERATURE_LOW = "temperature_low"
 ATTR_TEMPERATURE_AVG = "temperature_avg"

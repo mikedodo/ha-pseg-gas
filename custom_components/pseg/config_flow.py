@@ -22,12 +22,14 @@ from .const import (
     CONF_AUTH_TYPE,
     CONF_COOKIE,
     CONF_ELECTRIC_RATE,
+    CONF_GAS_RATE,
     CONF_MFA_CODE,
     CONF_MFA_METHOD,
     CONF_PASSWORD,
     CONF_USERNAME,
     DEFAULT_AUTH_SERVER_URL,
     DEFAULT_ELECTRIC_RATE,
+    DEFAULT_GAS_RATE,
     DEFAULT_MFA_METHOD,
     DOMAIN,
     MFA_METHOD_EMAIL,
@@ -726,6 +728,14 @@ class PsegOptionsFlowHandler(config_entries.OptionsFlow):
                 except (ValueError, TypeError):
                     user_input[CONF_ELECTRIC_RATE] = None
 
+            gas_rate = user_input.get(CONF_GAS_RATE)
+            if gas_rate is not None:
+                try:
+                    if float(gas_rate) <= 0:
+                        user_input[CONF_GAS_RATE] = None
+                except (ValueError, TypeError):
+                    user_input[CONF_GAS_RATE] = None
+
             # Normalize auth_server_url (allow empty for cookie-only users)
             auth_url = user_input.get(CONF_AUTH_SERVER_URL)
             if auth_url:
@@ -737,6 +747,7 @@ class PsegOptionsFlowHandler(config_entries.OptionsFlow):
 
         current_rate = self.config_entry.options.get(
             CONF_ELECTRIC_RATE,
+    CONF_GAS_RATE,
             self.config_entry.data.get(CONF_ELECTRIC_RATE),
         )
         current_auth_url = self.config_entry.options.get(
@@ -756,6 +767,18 @@ class PsegOptionsFlowHandler(config_entries.OptionsFlow):
                 schema_dict[vol.Optional(CONF_ELECTRIC_RATE)] = vol.Coerce(float)
         else:
             schema_dict[vol.Optional(CONF_ELECTRIC_RATE)] = vol.Coerce(float)
+
+        if current_gas_rate is not None:
+            try:
+                gas_rate_val = float(current_gas_rate)
+                if gas_rate_val > 0:
+                    schema_dict[vol.Optional(CONF_GAS_RATE, default=gas_rate_val)] = vol.Coerce(float)
+                else:
+                    schema_dict[vol.Optional(CONF_GAS_RATE)] = vol.Coerce(float)
+            except (ValueError, TypeError):
+                schema_dict[vol.Optional(CONF_GAS_RATE)] = vol.Coerce(float)
+        else:
+            schema_dict[vol.Optional(CONF_GAS_RATE, default=DEFAULT_GAS_RATE)] = vol.Coerce(float)
 
         auth_url_val = str(current_auth_url) if current_auth_url else ""
         schema_dict[vol.Optional(CONF_AUTH_SERVER_URL, default=auth_url_val)] = str
