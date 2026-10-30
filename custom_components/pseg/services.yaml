@@ -14,3 +14,16 @@ backfill_history:
       example: "2026-10-19"
       selector:
         date:
+    commodity:
+      name: Commodity
+      description: Which utility history to backfill (all, electricity, or gas).
+      default: all
+      selector:
+        select:
+          options:
+            - label: "Both (Electricity & Gas)"
+              value: "all"
+            - label: "Electricity Only"
+              value: "electricity"
+            - label: "Natural Gas Only"
+              value: "gas"

@@ -59,6 +59,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         """Handle backfill history service call."""
         start_date = call.data.get("start_date")
         end_date = call.data.get("end_date")
+        commodity = call.data.get("commodity", "all")
 
         coordinators = list(hass.data.get(DOMAIN, {}).values())
         if not coordinators:
@@ -67,7 +68,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         total_imported = 0
         for coord in coordinators:
             try:
-                count = await coord.async_backfill_history(start_date=start_date, end_date=end_date)
+                count = await coord.async_backfill_history(start_date=start_date, end_date=end_date, commodity=commodity)
                 total_imported += count
                 _LOGGER.info("PSE&G backfill service completed: %d records imported", count)
             except HomeAssistantError:

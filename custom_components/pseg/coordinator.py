@@ -385,8 +385,6 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         consumption_meta: StatisticMetaData = {
             "has_mean": False,
             "has_sum": True,
-            "mean_type": 0,
-            "unit_class": unit_class,
             "name": consumption_name,
             "source": DOMAIN,
             "statistic_id": consumption_id,
@@ -396,8 +394,6 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         cost_meta: StatisticMetaData = {
             "has_mean": False,
             "has_sum": True,
-            "mean_type": 0,
-            "unit_class": None,
             "name": cost_name,
             "source": DOMAIN,
             "statistic_id": cost_id,
@@ -517,8 +513,9 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self,
         start_date: str | None = None,
         end_date: str | None = None,
+        commodity: str = "all",
     ) -> int:
-        """Fetch and import historical data into Long-Term Statistics."""
+        """Fetch and import historical data into Long-Term Statistics for electricity and natural gas."""
         now = dt_util.now()
         if not end_date:
             end_date_str = now.strftime("%Y-%m-%d")
@@ -536,61 +533,92 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             start_date_str = str(start_date)
 
         _LOGGER.info(
-            "Starting PSE&G historical backfill from %s to %s...",
+            "Starting PSE&G historical backfill from %s to %s (commodity=%s)...",
             start_date_str,
             end_date_str,
+            commodity,
         )
 
-        try:
-            records = await self.hass.async_add_executor_job(
-                self.client.fetch_history_range,
-                start_date_str,
-                end_date_str,
-                90,
-            )
-        except PsegAuthError as auth_err:
-            _LOGGER.warning(
-                "Session expired during history backfill (%s). Attempting silent re-authentication...",
-                auth_err,
-            )
-            if await self.async_reauthenticate():
-                records = await self.hass.async_add_executor_job(
+        total_imported = 0
+
+        # Backfill Electricity
+        if commodity in ("all", "electricity"):
+            try:
+                records_elec = await self.hass.async_add_executor_job(
                     self.client.fetch_history_range,
                     start_date_str,
                     end_date_str,
                     90,
+                    False,
                 )
-            else:
-                self.auth_required = True
-                self.status = "auth_required"
-                is_cookie_mode = (
-                    self.entry_data.get(CONF_AUTH_TYPE) == AUTH_TYPE_COOKIE
-                    or not self.entry_data.get(CONF_USERNAME)
+            except PsegAuthError as auth_err:
+                _LOGGER.warning("Session expired during electricity backfill: %s. Attempting reauth...", auth_err)
+                if await self.async_reauthenticate():
+                    records_elec = await self.hass.async_add_executor_job(
+                        self.client.fetch_history_range,
+                        start_date_str,
+                        end_date_str,
+                        90,
+                        False,
+                    )
+                else:
+                    raise HomeAssistantError("PSE&G authentication failed during backfill") from auth_err
+
+            if records_elec:
+                await self.async_record_statistics(records_elec, is_backfill=True, is_gas=False)
+                total_imported += len(records_elec)
+                latest_elec = records_elec[-1]
+                if self._last_valid_data is not None:
+                    self._last_valid_data["history_14d"] = records_elec[-14:]
+                    self._last_valid_data["latest_date"] = latest_elec["date"]
+                    self._last_valid_data["latest_kwh"] = latest_elec.get("kwh", 0.0)
+                    self._last_valid_data["latest_cost"] = latest_elec.get("cost", 0.0)
+                    if len(records_elec) > 1:
+                        prev_elec = records_elec[-2]
+                        self._last_valid_data["previous_date"] = prev_elec["date"]
+                        self._last_valid_data["previous_kwh"] = prev_elec.get("kwh", 0.0)
+                        self._last_valid_data["previous_cost"] = prev_elec.get("cost", 0.0)
+
+        # Backfill Natural Gas
+        if commodity in ("all", "gas"):
+            try:
+                records_gas = await self.hass.async_add_executor_job(
+                    self.client.fetch_history_range,
+                    start_date_str,
+                    end_date_str,
+                    90,
+                    True,
                 )
-                addon_offline = not getattr(self, "_addon_connected", False) if not is_cookie_mode else False
-                self._raise_auth_issues(str(auth_err), addon_offline=addon_offline)
-                raise HomeAssistantError(
-                    "Session expired or authentication failed. Please re-authenticate under Settings > Devices & Services > PSE&G."
-                ) from auth_err
+            except PsegAuthError as auth_err:
+                _LOGGER.warning("Session expired during gas backfill: %s. Attempting reauth...", auth_err)
+                if await self.async_reauthenticate():
+                    records_gas = await self.hass.async_add_executor_job(
+                        self.client.fetch_history_range,
+                        start_date_str,
+                        end_date_str,
+                        90,
+                        True,
+                    )
+                else:
+                    raise HomeAssistantError("PSE&G authentication failed during backfill") from auth_err
 
-        if not records:
-            _LOGGER.warning("No historical records returned from PSE&G for %s to %s", start_date_str, end_date_str)
-            return 0
+            if records_gas:
+                await self.async_record_statistics(records_gas, is_backfill=True, is_gas=True)
+                total_imported += len(records_gas)
+                latest_gas = records_gas[-1]
+                if self._last_valid_data is not None:
+                    self._last_valid_data["gas_history_14d"] = records_gas[-14:]
+                    self._last_valid_data["latest_gas_date"] = latest_gas["date"]
+                    self._last_valid_data["latest_therms"] = latest_gas.get("therms", 0.0)
+                    self._last_valid_data["latest_gas_cost"] = latest_gas.get("cost", 0.0)
+                    if len(records_gas) > 1:
+                        prev_gas = records_gas[-2]
+                        self._last_valid_data["previous_gas_date"] = prev_gas["date"]
+                        self._last_valid_data["previous_therms"] = prev_gas.get("therms", 0.0)
+                        self._last_valid_data["previous_gas_cost"] = prev_gas.get("cost", 0.0)
 
-        await self.async_record_statistics(records, is_backfill=True, is_gas=False)
-
-        latest_record = records[-1]
         if self._last_valid_data is not None:
-            self._last_valid_data["history_14d"] = records[-14:]
-            self._last_valid_data["latest_date"] = latest_record["date"]
-            self._last_valid_data["latest_kwh"] = latest_record["kwh"]
-            self._last_valid_data["latest_cost"] = latest_record["cost"]
-            if len(records) > 1:
-                prev_record = records[-2]
-                self._last_valid_data["previous_date"] = prev_record["date"]
-                self._last_valid_data["previous_kwh"] = prev_record["kwh"]
-                self._last_valid_data["previous_cost"] = prev_record["cost"]
             self.async_set_updated_data(self._last_valid_data)
 
-        _LOGGER.info("Completed PSE&G backfill: imported %d days of statistics", len(records))
-        return len(records)
+        _LOGGER.info("Completed PSE&G backfill: imported %d records", total_imported)
+        return total_imported

@@ -151,7 +151,7 @@ class PsegClient:
         end_str: str,
         usage_type: str = "1",
         usage_interval: str = "5",
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """Query chart data from MyMeter for a given UsageType and interval."""
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
@@ -183,6 +183,8 @@ class PsegClient:
                 headers=headers,
                 timeout=25,
             )
+            if resp2.status_code in (401, 403) or "signin" in resp2.url.lower() or "login" in resp2.url.lower():
+                raise PsegAuthError("Session expired or rejected by portal")
             resp2.raise_for_status()
 
             ts = int(time.time() * 1000)
@@ -192,20 +194,23 @@ class PsegClient:
                 headers=headers,
                 timeout=25,
             )
+            if resp3.status_code in (401, 403) or "signin" in resp3.url.lower() or "login" in resp3.url.lower():
+                raise PsegAuthError("Session expired or rejected by portal")
             resp3.raise_for_status()
-            data = resp3.json()
-            return data
-        except Exception as err:
-            _LOGGER.debug("Error querying chart (usage_type=%s, interval=%s): %s", usage_type, usage_interval, err)
-            return None
+            return resp3.json()
+        except requests.RequestException as err:
+            raise PsegConnectionError(f"Failed to communicate with PSE&G chart endpoint: {err}") from err
+        except json.JSONDecodeError as err:
+            raise PsegConnectionError(f"Invalid JSON returned from PSE&G chart endpoint: {err}") from err
 
     def fetch_history_range(
         self,
         start_date_str: str,
         end_date_str: str,
         chunk_days: int = 90,
+        is_gas: bool = False,
     ) -> list[dict[str, Any]]:
-        """Fetch historical usage and cost data across a date range in polite chunks."""
+        """Fetch historical usage and cost data across a date range in polite chunks for electricity or gas."""
         token = self._get_verification_token()
 
         try:
@@ -219,22 +224,26 @@ class PsegClient:
 
         records_map: dict[str, dict[str, Any]] = {}
         curr_start = start_dt
+        effective_rate = self.effective_gas_rate if is_gas else self.effective_rate
+        usage_type = "2" if is_gas else "1"
+        commodity_label = "natural gas" if is_gas else "electricity"
 
         while curr_start <= end_dt:
             curr_end = min(curr_start + timedelta(days=chunk_days), end_dt)
             chunk_start_str = curr_start.strftime("%Y-%m-%d")
             chunk_end_str = curr_end.strftime("%Y-%m-%d")
-            _LOGGER.info("Fetching PSE&G history chunk from %s to %s...", chunk_start_str, chunk_end_str)
+            _LOGGER.info("Fetching PSE&G %s history chunk from %s to %s...", commodity_label, chunk_start_str, chunk_end_str)
 
-            data = self._query_chart(
-                token,
-                chunk_start_str,
-                chunk_end_str,
-                usage_type="1",
-                usage_interval="6",
-            )
-
-            if not data:
+            try:
+                data = self._query_chart(
+                    token,
+                    chunk_start_str,
+                    chunk_end_str,
+                    usage_type=usage_type,
+                    usage_interval="6",
+                )
+            except Exception as err:
+                _LOGGER.warning("Error querying %s history chunk (%s to %s): %s", commodity_label, chunk_start_str, chunk_end_str, err)
                 curr_start = curr_end + timedelta(days=1)
                 continue
 
@@ -244,22 +253,35 @@ class PsegClient:
                 for ar in ajax_results:
                     if isinstance(ar, dict) and ar.get("Action") == "Redirect":
                         raise PsegAuthError("Session expired during history backfill: Redirected to login")
-                _LOGGER.warning("No chart data returned for range %s to %s", chunk_start_str, chunk_end_str)
+                _LOGGER.warning("No %s chart data returned for range %s to %s", commodity_label, chunk_start_str, chunk_end_str)
             else:
                 series_list = chart_data.get("series", [])
-                meter_series = {}
+                target_series = {}
                 for s in series_list:
-                    if "Meter" in str(s.get("name") or ""):
-                        meter_series = s
+                    name = str(s.get("name") or "")
+                    unit = str(s.get("yAxisTitle") or s.get("unit") or "").lower()
+                    if "Temperature" in name:
+                        continue
+                    if is_gas and any(k in name.lower() or k in unit for k in ("gas", "therm", "ccf")):
+                        target_series = s
+                        break
+                    elif not is_gas and any(k in name.lower() or k in unit for k in ("meter", "electric", "kwh")):
+                        target_series = s
                         break
 
-                pts = meter_series.get("data", [])
+                if not target_series:
+                    for s in series_list:
+                        if "Temperature" not in str(s.get("name") or ""):
+                            target_series = s
+                            break
+
+                pts = target_series.get("data", [])
                 for pt in pts:
                     if isinstance(pt, dict):
                         value = point_value(pt)
                         if value is None:
                             continue
-                        kwh = round(value, 4)
+                        usage_val = round(value, 4)
                         hs = pt.get("hs", {})
                         p_start = hs.get("start", "")
                         try:
@@ -270,14 +292,19 @@ class PsegClient:
 
                         x = pt.get("x", 0)
                         start_utc = portal_time_to_utc(x) if x else None
-                        cost_val = round(kwh * self.effective_rate, 4)
+                        cost_val = round(usage_val * effective_rate, 4)
 
-                        records_map[date_iso] = {
+                        rec = {
                             "date": date_iso,
                             "start": start_utc,
-                            "kwh": kwh,
                             "cost": cost_val,
                         }
+                        if is_gas:
+                            rec["therms"] = usage_val
+                        else:
+                            rec["kwh"] = usage_val
+
+                        records_map[date_iso] = rec
 
             curr_start = curr_end + timedelta(days=1)
             if curr_start <= end_dt:
@@ -285,8 +312,9 @@ class PsegClient:
 
         sorted_records = [records_map[d] for d in sorted(records_map.keys())]
         _LOGGER.info(
-            "Fetched %d historical records across range %s to %s",
+            "Fetched %d %s historical records across range %s to %s",
             len(sorted_records),
+            "gas" if is_gas else "electricity",
             start_date_str,
             end_date_str,
         )
